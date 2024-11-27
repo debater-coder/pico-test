@@ -5,9 +5,10 @@
 #![no_main]
 
 use bsp::entry;
+use bsp::hal;
 use defmt::*;
 use defmt_rtt as _;
-use embedded_hal::digital::OutputPin;
+use embedded_hal::pwm::SetDutyCycle;
 use panic_probe as _;
 
 // Provide an alias for our BSP so we can switch targets quickly.
@@ -21,6 +22,12 @@ use bsp::hal::{
     sio::Sio,
     watchdog::Watchdog,
 };
+
+/// The minimum PWM value (i.e. LED brightness) we want
+const LOW: u16 = 0;
+
+/// The maximum PWM value (i.e. LED brightness) we want
+const HIGH: u16 = 25000;
 
 #[entry]
 fn main() -> ! {
@@ -62,16 +69,33 @@ fn main() -> ! {
     // If you have a Pico W and want to toggle a LED with a simple GPIO output pin, you can connect an external
     // LED to one of the GPIO pins, and reference that pin here. Don't forget adding an appropriate resistor
     // in series with the LED.
-    let mut led_pin = pins.led.into_push_pull_output();
 
+    // Init PWMs
+    let mut pwm_slices = hal::pwm::Slices::new(pac.PWM, &mut pac.RESETS);
+
+    // Configure PWM4
+    let pwm = &mut pwm_slices.pwm4;
+    pwm.set_ph_correct();
+    pwm.enable();
+
+    // Output channel B on PWM4 to GPIO 25
+    let channel = &mut pwm.channel_b;
+    channel.output_to(pins.led);
+
+    // Infinite loop, fading LED up and down
     loop {
-        info!("on!");
-        led_pin.set_high().unwrap();
-        delay.delay_ms(500);
-        info!("off!");
-        led_pin.set_low().unwrap();
+        // Ramp brightness up
+        for i in LOW..=HIGH {
+            delay.delay_us(8);
+            let _ = channel.set_duty_cycle(i);
+        }
+
+        // Ramp brightness down
+        for i in (LOW..=HIGH).rev() {
+            delay.delay_us(8);
+            let _ = channel.set_duty_cycle(i);
+        }
+
         delay.delay_ms(500);
     }
 }
-
-// End of file
