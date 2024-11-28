@@ -4,11 +4,13 @@
 #![no_std]
 #![no_main]
 
+mod motor;
+
 use bsp::entry;
 use bsp::hal;
 use defmt::*;
 use defmt_rtt as _;
-use embedded_hal::pwm::SetDutyCycle;
+use motor::Motor;
 use panic_probe as _;
 
 // Provide an alias for our BSP so we can switch targets quickly.
@@ -22,12 +24,6 @@ use bsp::hal::{
     sio::Sio,
     watchdog::Watchdog,
 };
-
-/// The minimum PWM value (i.e. LED brightness) we want
-const LOW: u16 = 0;
-
-/// The maximum PWM value (i.e. LED brightness) we want
-const HIGH: u16 = 25000;
 
 #[entry]
 fn main() -> ! {
@@ -60,6 +56,21 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
+    // Init PWMs
+    let mut pwm_slices = hal::pwm::Slices::new(pac.PWM, &mut pac.RESETS);
+
+    let lidar_pwm = pins.gpio0;
+    let lidar_dir = pins.gpio1;
+    let lidar_tx = pins.gpio2;
+
+    let lidar_pwm_slice = &mut pwm_slices.pwm0;
+
+    lidar_pwm_slice.set_ph_correct();
+    lidar_pwm_slice.enable();
+
+    let channel = &mut lidar_pwm_slice.channel_a;
+    channel.output_to(lidar_pwm);
+
     // This is the correct pin on the Raspberry Pico board. On other boards, even if they have an
     // on-board LED, it might need to be changed.
     //
@@ -70,32 +81,18 @@ fn main() -> ! {
     // LED to one of the GPIO pins, and reference that pin here. Don't forget adding an appropriate resistor
     // in series with the LED.
 
-    // Init PWMs
-    let mut pwm_slices = hal::pwm::Slices::new(pac.PWM, &mut pac.RESETS);
+    let mut motor = Motor {
+        pwm: channel,
+        dir: lidar_dir.into_push_pull_output(),
+    };
 
-    // Configure PWM4
-    let pwm = &mut pwm_slices.pwm4;
-    pwm.set_ph_correct();
-    pwm.enable();
-
-    // Output channel B on PWM4 to GPIO 25
-    let channel = &mut pwm.channel_b;
-    channel.output_to(pins.led);
-
-    // Infinite loop, fading LED up and down
     loop {
-        // Ramp brightness up
-        for i in LOW..=HIGH {
-            delay.delay_us(8);
-            let _ = channel.set_duty_cycle(i);
-        }
-
-        // Ramp brightness down
-        for i in (LOW..=HIGH).rev() {
-            delay.delay_us(8);
-            let _ = channel.set_duty_cycle(i);
-        }
-
+        motor.speed(100);
         delay.delay_ms(500);
+
+        motor.speed(-100);
+        delay.delay_ms(500);
+
+        motor.stop();
     }
 }
