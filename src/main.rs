@@ -13,6 +13,15 @@ use defmt_rtt as _;
 use motor::Motor;
 use panic_probe as _;
 
+use rp_pico::hal::uart::DataBits;
+use rp_pico::hal::uart::StopBits;
+use rp_pico::hal::uart::UartConfig;
+// USB Device support
+use usb_device::{class_prelude::*, prelude::*};
+
+// USB Communications Class Device support
+use usbd_serial::SerialPort;
+
 // Provide an alias for our BSP so we can switch targets quickly.
 // Uncomment the BSP you included in Cargo.toml, the rest of the code does not need to change.
 use rp_pico as bsp;
@@ -20,6 +29,7 @@ use rp_pico as bsp;
 
 use bsp::hal::{
     clocks::{init_clocks_and_plls, Clock},
+    fugit::RateExtU32,
     pac,
     sio::Sio,
     watchdog::Watchdog,
@@ -61,7 +71,19 @@ fn main() -> ! {
 
     let lidar_pwm = pins.gpio0;
     let lidar_dir = pins.gpio1;
-    let lidar_tx = pins.gpio2;
+
+    let uart_pins = (
+        // UART TX (characters sent from RP2040) on pin 1 (GPIO0)
+        pins.gpio4.into_function(), // dummy
+        // UART RX (characters received by RP2040) on pin 2 (GPIO1)
+        pins.gpio5.into_function(),
+    );
+    let mut lidar_uart = hal::uart::UartPeripheral::new(pac.UART1, uart_pins, &mut pac.RESETS)
+        .enable(
+            UartConfig::new(115200.Hz(), DataBits::Eight, None, StopBits::One),
+            clocks.peripheral_clock.freq(),
+        )
+        .unwrap();
 
     let lidar_pwm_slice = &mut pwm_slices.pwm0;
 
@@ -86,13 +108,35 @@ fn main() -> ! {
         dir: lidar_dir.into_push_pull_output(),
     };
 
+    // Set up the USB driver
+    let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
+        pac.USBCTRL_REGS,
+        pac.USBCTRL_DPRAM,
+        clocks.usb_clock,
+        true,
+        &mut pac.RESETS,
+    ));
+
+    // Set up the USB Communications Class Device driver
+    let mut serial = SerialPort::new(&usb_bus);
+
+    // Create a USB device with a fake VID and PID
+    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
+        .strings(&[StringDescriptors::default()
+            .manufacturer("Hamzah Ahmed")
+            .product("LIDAR driver")
+            .serial_number("Pico-1")])
+        .unwrap()
+        .device_class(2) // from: https://www.usb.org/defined-class-codes
+        .build();
+
     loop {
-        motor.speed(100);
-        delay.delay_ms(500);
-
-        motor.speed(-100);
-        delay.delay_ms(500);
-
-        motor.stop();
+        if lidar_uart.uart_is_readable() {
+            let buffer = &mut [0_u8; 256];
+            if let Ok(bytes_read) = lidar_uart.read_raw(buffer.as_mut_slice()) {
+                let _ = serial.write(&buffer[..bytes_read]);
+            }
+        }
+        usb_dev.poll(&mut [&mut serial]);
     }
 }
