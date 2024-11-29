@@ -4,6 +4,7 @@
 #![no_std]
 #![no_main]
 
+mod lidar;
 mod motor;
 
 use bsp::entry;
@@ -78,7 +79,14 @@ fn main() -> ! {
         // UART RX (characters received by RP2040) on pin 2 (GPIO1)
         pins.gpio5.into_function(),
     );
-    let mut lidar_uart = hal::uart::UartPeripheral::new(pac.UART1, uart_pins, &mut pac.RESETS)
+    let mut lidar_uart: hal::uart::UartPeripheral<
+        hal::uart::Enabled,
+        pac::UART1,
+        (
+            hal::gpio::Pin<hal::gpio::bank0::Gpio4, hal::gpio::FunctionUart, hal::gpio::PullDown>,
+            hal::gpio::Pin<hal::gpio::bank0::Gpio5, hal::gpio::FunctionUart, hal::gpio::PullDown>,
+        ),
+    > = hal::uart::UartPeripheral::new(pac.UART1, uart_pins, &mut pac.RESETS)
         .enable(
             UartConfig::new(115200.Hz(), DataBits::Eight, None, StopBits::One),
             clocks.peripheral_clock.freq(),
@@ -105,7 +113,7 @@ fn main() -> ! {
 
     let mut motor = Motor {
         pwm: channel,
-        dir: lidar_dir.into_push_pull_output(),
+        dir: &mut lidar_dir.into_push_pull_output(),
     };
 
     // Set up the USB driver
