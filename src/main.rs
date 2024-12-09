@@ -5,13 +5,16 @@
 #![no_main]
 
 mod lidar;
-mod motor;
+
+use core::fmt::Write;
 
 use bsp::entry;
 use bsp::hal;
 use defmt::*;
 use defmt_rtt as _;
-use motor::Motor;
+use heapless::String;
+use lib::Motor;
+use lidar::Lidar;
 use panic_probe as _;
 
 use rp_pico::hal::uart::DataBits;
@@ -40,7 +43,7 @@ use bsp::hal::{
 fn main() -> ! {
     info!("Program start");
     let mut pac = pac::Peripherals::take().unwrap();
-    let core = pac::CorePeripherals::take().unwrap();
+    // let core = pac::CorePeripherals::take().unwrap();
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
     let sio = Sio::new(pac.SIO);
 
@@ -58,7 +61,7 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+    // let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
     let pins = bsp::Pins::new(
         pac.IO_BANK0,
@@ -79,7 +82,7 @@ fn main() -> ! {
         // UART RX (characters received by RP2040) on pin 2 (GPIO1)
         pins.gpio5.into_function(),
     );
-    let mut lidar_uart: hal::uart::UartPeripheral<
+    let lidar_uart: hal::uart::UartPeripheral<
         hal::uart::Enabled,
         pac::UART1,
         (
@@ -111,10 +114,12 @@ fn main() -> ! {
     // LED to one of the GPIO pins, and reference that pin here. Don't forget adding an appropriate resistor
     // in series with the LED.
 
-    let mut motor = Motor {
+    let motor = Motor {
         pwm: channel,
         dir: &mut lidar_dir.into_push_pull_output(),
     };
+
+    let mut lidar = Lidar::new(motor, lidar_uart);
 
     // Set up the USB driver
     let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
@@ -139,12 +144,14 @@ fn main() -> ! {
         .build();
 
     loop {
-        if lidar_uart.uart_is_readable() {
-            let buffer = &mut [0_u8; 256];
-            if let Ok(bytes_read) = lidar_uart.read_raw(buffer.as_mut_slice()) {
-                let _ = serial.write(&buffer[..bytes_read]);
+        usb_dev.poll(&mut [&mut serial]);
+
+        if let Some(Ok(msgs)) = lidar.read() {
+            for msg in msgs {
+                let mut text: String<64> = String::new();
+                writeln!(&mut text, "{} {}", msg.angle, msg.distance).unwrap();
+                let _ = serial.write(text.as_bytes());
             }
         }
-        usb_dev.poll(&mut [&mut serial]);
     }
 }
