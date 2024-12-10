@@ -1,19 +1,27 @@
-use core::array;
+use core::{array, fmt::Write, iter::zip};
 
-use rp_pico::hal::uart::{Enabled, UartDevice, UartPeripheral, ValidUartPinout};
+use heapless::String;
+use rp_pico::hal::{
+    uart::{Enabled, UartDevice, UartPeripheral, ValidUartPinout},
+    usb::UsbBus,
+};
 
 use lib::Motor;
+use usbd_serial::SerialPort;
 
 #[derive(Debug, Clone)]
 pub enum LidarError {
     InvalidPacket,
     InvalidChecksum,
     InvalidData,
+    InvalidAngle,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct LidarMessage {
     pub angle: u16,
     pub distance: u16,
+    pub speed: u16,
 }
 
 pub struct Lidar<'a, U: UartDevice, P: ValidUartPinout<U>> {
@@ -33,7 +41,10 @@ impl<'a, U: UartDevice, P: ValidUartPinout<U>> Lidar<'a, U, P> {
         }
     }
 
-    pub fn read(&mut self) -> Option<Result<[LidarMessage; 4], LidarError>> {
+    pub fn read(
+        &mut self,
+        debug: &mut SerialPort<'_, UsbBus>,
+    ) -> Option<Result<[LidarMessage; 4], LidarError>> {
         if !self.uart.uart_is_readable() {
             return None;
         }
@@ -66,6 +77,11 @@ impl<'a, U: UartDevice, P: ValidUartPinout<U>> Lidar<'a, U, P> {
             index += 1;
         }
 
+        let mut text: String<256> = String::new();
+        writeln!(&mut text, "{:x?}", packet).unwrap();
+
+        debug.write(text.as_bytes());
+
         Some(match Self::decode_packet(&packet) {
             Err(e) => Err(e),
             Ok((msg, speed)) => {
@@ -78,27 +94,43 @@ impl<'a, U: UartDevice, P: ValidUartPinout<U>> Lidar<'a, U, P> {
 
     /// result is tuple of (msgs, speed)
     fn decode_packet(packet: &[u8; 22]) -> Result<([LidarMessage; 4], i32), LidarError> {
-        let mut packet = packet.iter();
-        assert_eq!(*packet.next().unwrap(), 0xfa);
+        assert_eq!(packet[0], 0xfa);
 
-        let angle: u16 = (packet.next().unwrap().wrapping_sub(0xa0)) as u16 * 4;
+        if packet[1] < 0xa0 || packet[1] > 0xf9 {
+            return Err(LidarError::InvalidAngle);
+        }
+        let angle: u16 = (packet[1] - 0xa0) as u16 * 4;
 
         let angle = angle % 360;
 
-        let bytes = (*packet.next().unwrap(), *packet.next().unwrap());
-        let speed: u16 = (bytes.1 as u16) << 8 | bytes.0 as u16;
+        let speed: u16 = (packet[3] as u16) << 8 | packet[2] as u16;
+        let speed = speed / 64;
 
-        let lidar_msgs: [LidarMessage; 4] = array::from_fn(|i| {
-            let bytes = (*packet.next().unwrap(), *packet.next().unwrap());
-            for _ in 0..2 {
-                packet.next();
-            }
+        let mut lidar_msgs: [LidarMessage; 4] = [LidarMessage {
+            angle: 0,
+            distance: 0,
+            speed: 0,
+        }; 4];
 
-            LidarMessage {
+        for (i, data_start) in [4, 8, 12, 16].iter().enumerate() {
+            lidar_msgs[i] = LidarMessage {
                 angle: angle + i as u16,
-                distance: ((bytes.1 as u16 & 0x3f) << 8) | bytes.0 as u16,
+                distance: ((packet[*data_start + 1] as u16 & 0x3f) << 8)
+                    | packet[*data_start] as u16,
+                speed,
             }
-        });
+        }
+
+        let mut checksum: u32 = 0;
+        for bytes in zip(packet.iter().step_by(2), packet.iter().skip(1).step_by(2)) {
+            checksum = (checksum << 1) + (((*bytes.0 as u16) << 8) | *bytes.1 as u16) as u32;
+        }
+
+        checksum = (checksum + (checksum >> 15)) & 0x7FFF;
+
+        if checksum != (packet[20] as u16 | (packet[21] as u16) << 8) as u32 {
+            return Err(LidarError::InvalidChecksum);
+        }
 
         Ok((lidar_msgs, speed.try_into().unwrap()))
     }
