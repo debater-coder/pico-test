@@ -1,4 +1,4 @@
-use core::{array, fmt::Write, iter::zip};
+use core::{fmt::Write, iter::zip};
 
 use heapless::String;
 use rp_pico::hal::{
