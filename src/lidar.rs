@@ -1,13 +1,13 @@
-use core::{fmt::Write, iter::zip};
-
-use heapless::String;
-use rp_pico::hal::{
-    uart::{Enabled, UartDevice, UartPeripheral, ValidUartPinout},
-    usb::UsbBus,
-};
+/// # Troubleshooting
+/// - Check motor direction
+use rp_pico::hal::uart::{Enabled, UartDevice, UartPeripheral, ValidUartPinout};
 
 use lib::Motor;
-use usbd_serial::SerialPort;
+
+const SCAN_RPM: u16 = 300;
+const INVALID_DATA_FLAG: u8 = 1 << 7;
+const STRENGTH_WARNING_FLAG: u8 = 1 << 6;
+const COMMAND_BYTE: u8 = 0xfa;
 
 #[derive(Debug, Clone)]
 pub enum LidarError {
@@ -22,6 +22,7 @@ pub struct LidarMessage {
     pub angle: u16,
     pub distance: u16,
     pub speed: u16,
+    pub strength_warning: bool,
 }
 
 pub struct Lidar<'a, U: UartDevice, P: ValidUartPinout<U>> {
@@ -41,10 +42,7 @@ impl<'a, U: UartDevice, P: ValidUartPinout<U>> Lidar<'a, U, P> {
         }
     }
 
-    pub fn read(
-        &mut self,
-        debug: &mut SerialPort<'_, UsbBus>,
-    ) -> Option<Result<[LidarMessage; 4], LidarError>> {
+    pub fn read(&mut self) -> Option<Result<[LidarMessage; 4], LidarError>> {
         if !self.uart.uart_is_readable() {
             return None;
         }
@@ -77,15 +75,10 @@ impl<'a, U: UartDevice, P: ValidUartPinout<U>> Lidar<'a, U, P> {
             index += 1;
         }
 
-        let mut text: String<256> = String::new();
-        writeln!(&mut text, "{:x?}", packet).unwrap();
-
-        debug.write(text.as_bytes());
-
         Some(match Self::decode_packet(&packet) {
             Err(e) => Err(e),
             Ok((msg, speed)) => {
-                self.set_motor_speed(speed, 200, 2.0, 0.3, 0.3);
+                self.set_motor_speed(speed, 300, 2.0, 0.3, 0.3);
 
                 Ok(msg)
             }
@@ -94,6 +87,9 @@ impl<'a, U: UartDevice, P: ValidUartPinout<U>> Lidar<'a, U, P> {
 
     /// result is tuple of (msgs, speed)
     fn decode_packet(packet: &[u8; 22]) -> Result<([LidarMessage; 4], i32), LidarError> {
+        if !Self::check_packet_valid(packet) {
+            return Err(LidarError::InvalidChecksum);
+        }
         assert_eq!(packet[0], 0xfa);
 
         if packet[1] < 0xa0 || packet[1] > 0xf9 {
@@ -110,29 +106,35 @@ impl<'a, U: UartDevice, P: ValidUartPinout<U>> Lidar<'a, U, P> {
             angle: 0,
             distance: 0,
             speed: 0,
-        }; 4];
+            strength_warning: true,
+        }; 4]; // This isn't ideal but it works
 
         for (i, data_start) in [4, 8, 12, 16].iter().enumerate() {
+            if packet[*data_start + 1] & INVALID_DATA_FLAG != 0 {
+                return Err(LidarError::InvalidData);
+            }
             lidar_msgs[i] = LidarMessage {
                 angle: angle + i as u16,
                 distance: ((packet[*data_start + 1] as u16 & 0x3f) << 8)
                     | packet[*data_start] as u16,
                 speed,
+                strength_warning: packet[*data_start + 1] & STRENGTH_WARNING_FLAG == 0,
             }
         }
 
-        let mut checksum: u32 = 0;
-        for bytes in zip(packet.iter().step_by(2), packet.iter().skip(1).step_by(2)) {
-            checksum = (checksum << 1) + (((*bytes.0 as u16) << 8) | *bytes.1 as u16) as u32;
-        }
-
-        checksum = (checksum + (checksum >> 15)) & 0x7FFF;
-
-        if checksum != (packet[20] as u16 | (packet[21] as u16) << 8) as u32 {
-            return Err(LidarError::InvalidChecksum);
-        }
-
         Ok((lidar_msgs, speed.try_into().unwrap()))
+    }
+
+    fn check_packet_valid(packet: &[u8; 22]) -> bool {
+        let mut checksum: u32 = 0;
+
+        for i in (0..20).skip(2) {
+            checksum = (checksum << 1) + (packet[i] as u16 + (packet[i + 1] as u16 >> 8)) as u32;
+        }
+
+        checksum = (checksum & 0x07fff) + (checksum >> 15);
+
+        return (checksum & 0xff) as u8 == packet[20] && (checksum >> 8) as u8 == packet[21];
     }
 
     fn set_motor_speed(&mut self, actual: i32, target: i32, kp: f32, ki: f32, kd: f32) {

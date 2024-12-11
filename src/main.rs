@@ -146,7 +146,7 @@ fn main() -> ! {
     loop {
         usb_dev.poll(&mut [&mut serial]);
 
-        if let Some(Ok(msgs)) = lidar.read(&mut serial) {
+        if let Some(Ok(msgs)) = lidar.read() {
             for msg in msgs {
                 let mut text: String<64> = String::new();
                 writeln!(&mut text, "{:?}", msg).unwrap();
